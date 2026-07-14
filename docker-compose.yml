@@ -59,6 +59,21 @@ services:
     networks:
       - festival-net
 
+  api:
+    build: ./api
+    container_name: festival-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgresql://festival:festival@postgres:5432/festivalos
+      WS_PUSH_INTERVAL_SECONDS: 3
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - festival-net
+
 volumes:
   kafka_data:
 
