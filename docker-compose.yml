@@ -41,14 +41,29 @@ services:
   api:
     build: ./api
     container_name: festival-api
+    ports:
+      - "8001:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
     environment:
       POSTGRES_DSN: postgresql://festival:festival@postgres:5432/festivalos
-      WS_PUSH_INTERVAL_SECONDS: 3
+      WS_PUSH_INTERVAL_SECONDS: "2.0"
+    restart: unless-stopped
+    networks:
+      - festival-net
+
+  frontend:
+    build: ./frontend
+    container_name: festival-frontend
+    depends_on:
+      - api
     ports:
-      - "8000:8000"
+      - "5174:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true
     restart: unless-stopped
     networks:
       - festival-net
