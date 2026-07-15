@@ -1,3 +1,16 @@
+"""
+Processor — consomme Kafka (visitors.position, logistics.stock), maintient
+un état courant en mémoire, agrège périodiquement par zone, détecte les
+anomalies (règles + Isolation Forest) et écrit tout dans PostgreSQL.
+Les alertes sont aussi republiées sur le topic alerts.critical.
+
+C'est le remplaçant "léger" de Spark Streaming pour le MVP : même rôle
+fonctionnel (ingestion + agrégation temps réel), implémentation en pandas/
+Python pur pour aller vite. Le format des tables Postgres reste identique
+à la version cible, ce qui permet de brancher un vrai job Spark plus tard
+sans rien changer côté schéma ni côté Kafka.
+"""
+
 import os
 import json
 import time
@@ -19,9 +32,13 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
 POSTGRES_DSN = os.getenv("POSTGRES_DSN", "postgresql://festival:festival@postgres:5432/festivalos")
 AGG_WINDOW_SECONDS = int(os.getenv("AGG_WINDOW_SECONDS", "15"))
 
-DENSITY_ALERT_THRESHOLD = 0.85
-STOCK_ALERT_THRESHOLD = 15.0
+DENSITY_ALERT_THRESHOLD = 0.85   # % de la capacité de la scène
+STOCK_ALERT_THRESHOLD = 15.0     # % de stock restant
 
+
+# ------------------------------------------------------------------
+# Connexions avec retry (les autres conteneurs peuvent démarrer avant Kafka/PG)
+# ------------------------------------------------------------------
 def connect_pg(retries=30, delay=2):
     for attempt in range(retries):
         try:
@@ -67,14 +84,18 @@ def make_producer(retries=30, delay=2):
             time.sleep(delay)
     raise RuntimeError("Impossible de se connecter à Kafka")
 
+
+# ------------------------------------------------------------------
+# État courant en mémoire
+# ------------------------------------------------------------------
 class State:
     def __init__(self, conn):
         self.lock = threading.Lock()
-        self.visitor_zone = {}
-        self.visitor_speed = {}
-        self.stock_levels = {}
-        self.scene_capacity = {}
-        self.density_history = defaultdict(list)
+        self.visitor_zone = {}                       # visitor_id -> zone_id
+        self.visitor_speed = {}                       # visitor_id -> speed
+        self.stock_levels = {}                         # resource_id -> {...}
+        self.scene_capacity = {}                        # zone_id -> capacity
+        self.density_history = defaultdict(list)         # zone_id -> [density,...]
         self._load_scenes(conn)
 
     def _load_scenes(self, conn):
@@ -111,29 +132,28 @@ class State:
         with self.lock:
             return dict(self.stock_levels)
 
+
+# ------------------------------------------------------------------
+# Détection d'anomalies — Isolation Forest léger, réentraîné à la volée
+# ------------------------------------------------------------------
 def detect_density_anomaly(state, zone_id, density):
     history = state.density_history[zone_id]
     history.append(density)
     if len(history) > 200:
         del history[: len(history) - 200]
     if len(history) < 30:
-        return False
+        return False  # pas assez d'historique pour juger
 
-    arr = np.array(history)
-    std = arr.std()
-    if std < 1e-4:
-        return False  # série trop plate pour juger
-
-    z_score = abs((density - arr.mean()) / std)
-    if z_score < 2.5:
-        return False  # écart pas assez significatif, inutile de solliciter le modèle
-
-    X = arr.reshape(-1, 1)
-    model = IsolationForest(n_estimators=50, contamination=0.05, random_state=42)
+    X = np.array(history).reshape(-1, 1)
+    model = IsolationForest(n_estimators=50, contamination=0.1, random_state=42)
     model.fit(X)
-    prediction = model.predict([[density]])[0]
+    prediction = model.predict([[density]])[0]  # -1 = anomalie, 1 = normal
     return prediction == -1
 
+
+# ------------------------------------------------------------------
+# Écriture PostgreSQL
+# ------------------------------------------------------------------
 def write_zone_metrics(conn, rows):
     if not rows:
         return
@@ -159,16 +179,9 @@ def write_alert(conn, producer, alert):
     log.warning("ALERTE %s zone=%s valeur=%.2f", alert["type"], alert["zone_id"], alert["value"])
 
 
-def write_resource_levels(conn, resources_snapshot):
-    if not resources_snapshot:
-        return
-    with conn.cursor() as cur:
-        for resource_id, info in resources_snapshot.items():
-            cur.execute(
-                "UPDATE resources SET stock_level_pct = %s, updated_at = %s WHERE resource_id = %s",
-                (info["pct"], datetime.now(timezone.utc), resource_id),
-            )
-
+# ------------------------------------------------------------------
+# Boucles principales
+# ------------------------------------------------------------------
 def consume_loop(consumer, state):
     for msg in consumer:
         try:
@@ -214,8 +227,6 @@ def aggregate_loop(state, conn, producer):
 
         write_zone_metrics(conn, rows)
         log.info("Agrégation écrite pour %s zones", len(rows))
-
-        write_resource_levels(conn, state.snapshot_stocks())
 
         for resource_id, info in state.snapshot_stocks().items():
             if info["pct"] < STOCK_ALERT_THRESHOLD:
