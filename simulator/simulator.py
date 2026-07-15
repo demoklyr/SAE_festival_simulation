@@ -20,9 +20,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [simulator] %(messag
 log = logging.getLogger("simulator")
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:9092")
-NUM_VISITORS = int(os.getenv("NUM_VISITORS", "300"))
+NUM_VISITORS = int(os.getenv("NUM_VISITORS", "7000"))
 TICK_SECONDS = float(os.getenv("TICK_SECONDS", "2"))
-STOCK_TICK_EVERY = int(os.getenv("STOCK_TICK_EVERY", "5"))  # publie le stock toutes les N ticks
+STOCK_TICK_EVERY = int(os.getenv("STOCK_TICK_EVERY", "2"))  # publie le stock toutes les N ticks
 
 # Doit rester cohérent avec postgres/init.sql
 SCENES = {
