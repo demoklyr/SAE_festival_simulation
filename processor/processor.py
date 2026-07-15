@@ -165,6 +165,21 @@ def write_zone_metrics(conn, rows):
         )
 
 
+def write_stock_levels(conn, rows):
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """UPDATE resources AS r
+               SET stock_level_pct = data.stock_level_pct,
+                   updated_at = data.updated_at
+               FROM (VALUES %s) AS data(resource_id, stock_level_pct, updated_at)
+               WHERE r.resource_id = data.resource_id""",
+            rows,
+        )
+
+
 def write_alert(conn, producer, alert):
     with conn.cursor() as cur:
         cur.execute(
@@ -228,7 +243,9 @@ def aggregate_loop(state, conn, producer):
         write_zone_metrics(conn, rows)
         log.info("Agrégation écrite pour %s zones", len(rows))
 
+        stock_rows = []
         for resource_id, info in state.snapshot_stocks().items():
+            stock_rows.append((resource_id, info["pct"], now))
             if info["pct"] < STOCK_ALERT_THRESHOLD:
                 write_alert(conn, producer, {
                     "type": "stock_low",
@@ -238,6 +255,7 @@ def aggregate_loop(state, conn, producer):
                     "threshold": STOCK_ALERT_THRESHOLD,
                     "recommended_action": f"réapprovisionner {resource_id}",
                 })
+        write_stock_levels(conn, stock_rows)
 
 
 def main():
