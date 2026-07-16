@@ -129,7 +129,7 @@ services:
         condition: service_completed_successfully
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
-      NUM_VISITORS: 300
+      NUM_VISITORS: 3000
       TICK_SECONDS: 2
     restart: unless-stopped
     networks:
